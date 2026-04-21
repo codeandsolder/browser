@@ -80,8 +80,14 @@ shutdown: std.atomic.Value(bool) = .init(false),
 // Currently, Network is used sparingly, and we only create it on demand.
 // When Network becomes truly shared, it should become a regular field.
 multi: ?*libcurl.CurlM = null,
+
+// One mutex guards both submission lists. Workers push via submitRequest /
+// submitRemove; main pops in drainQueue. Each Connection participates in
+// at most one list at a time, so the embedded `conn.node` is reused across
+// operations.
 submission_mutex: std.Thread.Mutex = .{},
-submission_queue: std.DoublyLinkedList = .{},
+pending_add: std.DoublyLinkedList = .{},
+pending_remove: std.DoublyLinkedList = .{},
 
 callbacks: [MAX_TICK_CALLBACKS]TickCallback = undefined,
 callbacks_len: usize = 0,
@@ -476,7 +482,7 @@ pub fn run(self: *Network) void {
             // Check if fireTicks submitted new requests (e.g. telemetry flush).
             // If so, continue the loop to drain and send them before exiting.
             self.submission_mutex.lock();
-            const has_pending = self.submission_queue.first != null;
+            const has_pending = self.pending_add.first != null or self.pending_remove.first != null;
             self.submission_mutex.unlock();
             if (!has_pending) break;
         }
@@ -497,9 +503,50 @@ pub fn run(self: *Network) void {
 }
 
 pub fn submitRequest(self: *Network, conn: *http.Connection) void {
-    self.submission_mutex.lock();
-    self.submission_queue.append(&conn.node);
-    self.submission_mutex.unlock();
+    {
+        self.submission_mutex.lock();
+        defer self.submission_mutex.unlock();
+        lp.assert(conn._submission == .idle, "submitRequest: conn not idle", .{});
+        conn._submission = .pending_add;
+        self.pending_add.append(&conn.node);
+    }
+    self.wakeupPoll();
+}
+
+// Fired from the worker thread. If the conn is still in pending_add
+// (never reached the multi), short-circuit: remove it from the list and
+// deliver a Canceled completion synchronously via on_complete. Otherwise
+// queue a remove for main to process.
+pub fn submitRemove(self: *Network, conn: *http.Connection) void {
+    var local_cancel: bool = false;
+    {
+        self.submission_mutex.lock();
+        defer self.submission_mutex.unlock();
+        switch (conn._submission) {
+            .pending_add => {
+                self.pending_add.remove(&conn.node);
+                conn._submission = .idle;
+                local_cancel = true;
+            },
+            .in_multi => {
+                conn._submission = .pending_remove;
+                self.pending_remove.append(&conn.node);
+            },
+            .idle, .pending_remove => {
+                lp.log.warn(.app, "submitRemove bad state", .{ .state = @tagName(conn._submission) });
+                return;
+            },
+        }
+    }
+    if (local_cancel) {
+        if (conn.on_complete) |cb| {
+            conn._completion_err = error.Canceled;
+            cb(conn, error.Canceled);
+        } else {
+            self.releaseConnection(conn);
+        }
+        return;
+    }
     self.wakeupPoll();
 }
 
@@ -508,11 +555,47 @@ fn wakeupPoll(self: *Network) void {
 }
 
 fn drainQueue(self: *Network) void {
-    self.submission_mutex.lock();
-    defer self.submission_mutex.unlock();
+    // Collect work under the lock, then execute outside: handleAdd /
+    // handleRemove may call into on_complete (which pushes to worker
+    // slots) and releaseConnection, and we don't want those to run while
+    // holding submission_mutex.
+    var to_add: std.DoublyLinkedList = .{};
+    var to_remove: std.DoublyLinkedList = .{};
+    {
+        self.submission_mutex.lock();
+        defer self.submission_mutex.unlock();
 
-    if (self.submission_queue.first == null) return;
+        while (self.pending_remove.popFirst()) |node| {
+            const conn: *http.Connection = @fieldParentPtr("node", node);
+            lp.assert(conn._submission == .pending_remove, "drainQueue: conn not in pending_remove", .{});
+            conn._submission = .idle;
+            to_remove.append(node);
+        }
+        while (self.pending_add.popFirst()) |node| {
+            const conn: *http.Connection = @fieldParentPtr("node", node);
+            lp.assert(conn._submission == .pending_add, "drainQueue: conn not in pending_add", .{});
+            // `in_multi` is the target state; handleAdd may downgrade to
+            // idle on failure and release the conn.
+            conn._submission = .in_multi;
+            to_add.append(node);
+        }
+    }
 
+    // Process removes before adds: cancellations should take effect before
+    // we admit new transfers.
+    while (to_remove.popFirst()) |node| {
+        const conn: *http.Connection = @fieldParentPtr("node", node);
+        self.handleRemove(conn);
+    }
+    while (to_add.popFirst()) |node| {
+        const conn: *http.Connection = @fieldParentPtr("node", node);
+        self.handleAdd(conn);
+    }
+}
+
+// Assumes conn._submission has already been set to .in_multi. On failure
+// we must roll back to .idle and release the conn.
+fn handleAdd(self: *Network, conn: *http.Connection) void {
     const multi = self.multi orelse blk: {
         const m = libcurl.curl_multi_init() orelse {
             lp.assert(false, "curl multi init failed", .{});
@@ -522,17 +605,43 @@ fn drainQueue(self: *Network) void {
         break :blk m;
     };
 
-    while (self.submission_queue.popFirst()) |node| {
-        const conn: *http.Connection = @fieldParentPtr("node", node);
-        conn.setPrivate(conn) catch |err| {
-            lp.log.err(.app, "curl set private", .{ .err = err });
-            self.releaseConnection(conn);
-            continue;
-        };
-        libcurl.curl_multi_add_handle(multi, conn._easy) catch |err| {
-            lp.log.err(.app, "curl multi add", .{ .err = err });
-            self.releaseConnection(conn);
-        };
+    conn.setPrivate(conn) catch |err| {
+        lp.log.err(.app, "curl set private", .{ .err = err });
+        self.handleAddFailure(conn, err);
+        return;
+    };
+    libcurl.curl_multi_add_handle(multi, conn._easy) catch |err| {
+        lp.log.err(.app, "curl multi add", .{ .err = err });
+        self.handleAddFailure(conn, err);
+    };
+}
+
+fn handleAddFailure(self: *Network, conn: *http.Connection, err: anyerror) void {
+    {
+        self.submission_mutex.lock();
+        defer self.submission_mutex.unlock();
+        conn._submission = .idle;
+    }
+    if (conn.on_complete) |cb| {
+        conn._completion_err = err;
+        cb(conn, err);
+    } else {
+        self.releaseConnection(conn);
+    }
+}
+
+// Assumes conn._submission has already been set to .idle and the conn is
+// not in any submission list. The conn may still be in the multi (normal
+// cancel path).
+fn handleRemove(self: *Network, conn: *http.Connection) void {
+    if (self.multi) |multi| {
+        _ = libcurl.curl_multi_remove_handle(multi, conn._easy) catch {};
+    }
+    if (conn.on_complete) |cb| {
+        conn._completion_err = error.Canceled;
+        cb(conn, error.Canceled);
+    } else {
+        self.releaseConnection(conn);
     }
 }
 
@@ -592,13 +701,12 @@ fn getCurlTimeout(self: *Network) i32 {
 fn processCompletions(self: *Network, multi: *libcurl.CurlM) void {
     var msgs_in_queue: c_int = 0;
     while (libcurl.curl_multi_info_read(multi, &msgs_in_queue)) |msg| {
-        switch (msg.data) {
-            .done => |maybe_err| {
-                if (maybe_err) |err| {
-                    lp.log.warn(.app, "curl transfer error", .{ .err = err });
-                }
-            },
+        const maybe_err: ?anyerror = switch (msg.data) {
+            .done => |e| e,
             else => continue,
+        };
+        if (maybe_err) |err| {
+            lp.log.warn(.app, "curl transfer error", .{ .err = err });
         }
 
         const easy: *libcurl.Curl = msg.easy_handle;
@@ -608,7 +716,28 @@ fn processCompletions(self: *Network, multi: *libcurl.CurlM) void {
         const conn: *http.Connection = @ptrCast(@alignCast(ptr));
 
         libcurl.curl_multi_remove_handle(multi, easy) catch {};
-        self.releaseConnection(conn);
+
+        // Transition submission state. Races with worker submitRemove:
+        // if the worker already queued a remove, we absorb it here and
+        // treat this as a normal completion (cancel-after-complete is
+        // effectively a no-op).
+        {
+            self.submission_mutex.lock();
+            defer self.submission_mutex.unlock();
+            switch (conn._submission) {
+                .in_multi => {},
+                .pending_remove => self.pending_remove.remove(&conn.node),
+                else => lp.assert(false, "completion bad state", .{ .state = @tagName(conn._submission) }),
+            }
+            conn._submission = .idle;
+        }
+
+        if (conn.on_complete) |cb| {
+            conn._completion_err = maybe_err;
+            cb(conn, maybe_err);
+        } else {
+            self.releaseConnection(conn);
+        }
     }
 }
 

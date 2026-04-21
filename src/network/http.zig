@@ -262,9 +262,37 @@ fn opensocketCallback(
 
 pub const Connection = struct {
     _easy: *libcurl.Curl,
-    in_use: bool,
     transport: Transport,
+
+    // Network-side node: the conn's submission state selects which list
+    // currently owns it (available pool / pending_add / pending_remove /
+    // Slot queue). Transitions of `_submission` and list membership must
+    // happen together under `Network.submission_mutex`.
     node: std.DoublyLinkedList.Node = .{},
+
+    // Worker-side: HttpClient.in_use. Independent of `node`.
+    _worker_node: std.DoublyLinkedList.Node = .{},
+
+    // Tracks which submission list (if any) currently contains `node`.
+    // Guarded by Network.submission_mutex.
+    _submission: SubmissionState = .idle,
+
+    // If set, called after the easy handle is removed from the multi; the
+    // callback takes ownership of the conn and must eventually release it.
+    on_complete: ?*const fn (conn: *Connection, err: ?anyerror) void = null,
+
+    // Err stashed by on_complete for worker to pick up via Slot.
+    _completion_err: ?anyerror = null,
+
+    pub const SubmissionState = enum(u8) {
+        // Not in pending_add/pending_remove, not in the curl multi.
+        // Conn is either in the pool, freshly drawn, or in worker/slot
+        // queues.
+        idle,
+        pending_add,
+        in_multi,
+        pending_remove,
+    };
 
     pub const Transport = union(enum) {
         none, // used for cases that manage their own connection, e.g. telemetry
@@ -279,7 +307,7 @@ pub const Connection = struct {
     ) !Connection {
         const easy = libcurl.curl_easy_init() orelse return error.FailedToInitializeEasy;
 
-        var self = Connection{ ._easy = easy, .in_use = false, .transport = .none };
+        var self = Connection{ ._easy = easy, .transport = .none };
         errdefer self.deinit();
 
         try self.reset(config, ca_blob, ip_filter);
@@ -411,6 +439,10 @@ pub const Connection = struct {
     ) !void {
         libcurl.curl_easy_reset(self._easy);
         self.transport = .none;
+        self.on_complete = null;
+        self._completion_err = null;
+        // _submission is owned by Network under its submission_mutex and
+        // should already be .idle before reset — caller contract.
 
         // timeouts
         try libcurl.curl_easy_setopt(self._easy, .timeout_ms, config.httpTimeout());

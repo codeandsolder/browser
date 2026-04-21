@@ -180,7 +180,7 @@ pub fn init(url: []const u8, protocols: [][]const u8, page: *Page) !*WebSocket {
         ._http_client = http_client,
     });
     conn.transport = .{ .websocket = self };
-    try http_client.trackConn(conn);
+    http_client.trackConn(conn);
 
     if (comptime IS_DEBUG) {
         log.info(.websocket, "connecting", .{ .url = url });
@@ -195,7 +195,7 @@ pub fn init(url: []const u8, protocols: [][]const u8, page: *Page) !*WebSocket {
 }
 
 pub fn deinit(self: *WebSocket, session: *Session) void {
-    self.cleanup();
+    self.cleanup(false);
 
     if (self._on_open) |func| {
         func.release();
@@ -229,17 +229,22 @@ fn asEventTarget(self: *WebSocket) *EventTarget {
     return self._proto;
 }
 
-// we're being aborted internally (e.g. page shutting down)
+// we're being aborted internally (e.g. page shutting down). The canceled
+// completion will later flow through disconnected() which skips the JS
+// dispatch path because _ready_state is already .closed.
 pub fn kill(self: *WebSocket) void {
-    self.cleanup();
+    self._ready_state = .closed;
+    self.cleanup(false);
 }
 
 pub fn disconnected(self: *WebSocket, err_: ?anyerror) void {
-    if (self._ready_state == .closed) {
-        // already disconnected (e.g. close-handshake disconnected us, then
-        // libcurl reports the same connection completion).
-        return;
-    }
+    // cleanup(true) must always run (finishConn + releaseRef). JS-visible
+    // dispatch is skipped when we were already closed (kill, or a prior
+    // close-handshake that already queued the close event).
+    defer self.cleanup(true);
+
+    if (self._ready_state == .closed) return;
+
     const was_clean = self._ready_state == .closing and err_ == null;
     self._ready_state = .closed;
 
@@ -259,18 +264,26 @@ pub fn disconnected(self: *WebSocket, err_: ?anyerror) void {
         .with_error = !was_clean,
     };
     self.markReady();
-
-    self.cleanup();
 }
 
-fn cleanup(self: *WebSocket) void {
-    if (self._conn) |conn| {
-        self._http_client.removeConn(conn);
-        self._req_headers.deinit();
-        self._conn = null;
-        self.releaseRef(self._page._session);
-        self._send_queue.clearRetainingCapacity();
+// `completed`:
+// - true  → completion arrived (normal, cancel, or error). Release the
+//           conn to the pool and drop the create-time ref. Always called
+//           from `disconnected()`.
+// - false → begin cancel. The conn is still referenced by `self._conn`;
+//           the canceled completion will later flow through
+//           `disconnected()` which calls `cleanup(true)` to finalize.
+fn cleanup(self: *WebSocket, completed: bool) void {
+    const conn = self._conn orelse return;
+    if (!completed) {
+        self._http_client.cancelConn(conn);
+        return;
     }
+    self._http_client.finishConn(conn);
+    self._req_headers.deinit();
+    self._conn = null;
+    self.releaseRef(self._page._session);
+    self._send_queue.clearRetainingCapacity();
 }
 
 fn queueMessage(self: *WebSocket, msg: Message) !void {
@@ -391,7 +404,7 @@ pub fn close(self: *WebSocket, code_: ?u16, reason_: ?[]const u8) !void {
             .with_error = false,
         };
         self.markReady();
-        self.cleanup();
+        self.cleanup(false);
         return;
     }
 
