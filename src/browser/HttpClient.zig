@@ -660,86 +660,57 @@ pub const Layer = struct {
     }
 };
 
-pub fn LayerStack(comptime layer_types: anytype) type {
-    return struct {
-        ptrs: [layer_types.len]*anyopaque,
-        layers: [layer_types.len]Layer,
-
-        const Self = @This();
-
-        pub fn init(allocator: Allocator, transport: *Transport, instances: anytype) !Self {
-            var ptrs: [layer_types.len]*anyopaque = undefined;
-            var layers: [layer_types.len]Layer = undefined;
-
-            inline for (layer_types, 0..) |T, i| {
-                const ptr = try allocator.create(T);
-                ptr.* = instances[i];
-                ptrs[i] = ptr;
-                layers[i] = ptr.layer();
-            }
-
-            // Wire inner: each layer's `next` points to the next layer.
-            // Done after all layers are created so pointers are stable.
-            inline for (layer_types, 0..) |T, i| {
-                if (@hasField(T, "next")) {
-                    const ptr: *T = @ptrCast(@alignCast(ptrs[i]));
-                    if (i + 1 < layer_types.len) {
-                        ptr.next = layers[i + 1];
-                    } else {
-                        ptr.next = transport.layer();
-                    }
-                }
-            }
-
-            return .{ .ptrs = ptrs, .layers = layers };
-        }
-
-        pub fn deinit(self: *Self, allocator: Allocator) void {
-            inline for (layer_types, 0..) |T, i| {
-                const ptr: *T = @ptrCast(@alignCast(self.ptrs[i]));
-                if (@hasDecl(T, "deinit")) ptr.deinit(allocator);
-                allocator.destroy(ptr);
-            }
-        }
-
-        pub fn top(self: *Self) Layer {
-            return self.layers[0];
-        }
-    };
+fn layerWith(self: anytype, next: Layer) Layer {
+    self.next = next;
+    return self.layer();
 }
-
-pub const Layers = LayerStack(.{ RobotsLayer, WebBotAuthLayer, CacheLayer });
 
 const Client = @This();
 
 transport: *Transport,
-layers: Layers,
+
+cache: CacheLayer,
+robots: RobotsLayer,
+web_bot_auth: WebBotAuthLayer,
+entry: Layer,
 
 pub fn init(allocator: Allocator, net: *Network) !*Client {
     const transport = try Transport.init(allocator, net);
     errdefer transport.deinit();
 
-    var layers = try Layers.init(allocator, transport, .{
-        RobotsLayer{
-            .obey_robots = net.config.obeyRobots(),
-            .allocator = allocator,
-            .pending = .empty,
-        },
-        WebBotAuthLayer{},
-        CacheLayer{},
-    });
-    errdefer layers.deinit(allocator);
-
     const client = try allocator.create(Client);
     errdefer allocator.destroy(client);
 
-    client.* = .{ .transport = transport, .layers = layers };
+    client.* = .{
+        .transport = transport,
+        .cache = .{},
+        .robots = .{ .allocator = allocator },
+        .web_bot_auth = .{},
+        .entry = undefined,
+    };
+
+    // Built from the inside out.
+    var next = transport.layer();
+
+    if (net.config.webBotAuth() != null) {
+        next = layerWith(&client.web_bot_auth, next);
+    }
+
+    if (net.config.obeyRobots()) {
+        next = layerWith(&client.robots, next);
+    }
+
+    if (net.config.httpCacheDir() != null) {
+        next = layerWith(&client.cache, next);
+    }
+
+    client.entry = next;
     return client;
 }
 
 pub fn deinit(self: *Client) void {
     const allocator = self.transport.allocator;
-    self.layers.deinit(allocator);
+    self.robots.deinit(allocator);
     self.transport.deinit();
     allocator.destroy(self);
 }
@@ -775,7 +746,7 @@ pub fn tick(self: *Client, timeout_ms: u32) !PerformStatus {
 /// Dispatch a request through the full middleware stack.
 pub fn request(self: *Client, req: Request) !void {
     const ctx = Context{ .network = self.transport.network };
-    return self.layers.top().request(ctx, req);
+    return self.entry.request(ctx, req);
 }
 
 pub const SyncResponse = struct {

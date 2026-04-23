@@ -30,7 +30,6 @@ const Forward = @import("Forward.zig");
 const RobotsLayer = @This();
 
 next: Layer = undefined,
-obey_robots: bool,
 allocator: std.mem.Allocator,
 pending: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(Request)) = .empty,
 
@@ -53,10 +52,6 @@ pub fn deinit(self: *RobotsLayer, allocator: std.mem.Allocator) void {
 
 fn request(ptr: *anyopaque, ctx: Context, req: Request) anyerror!void {
     const self: *RobotsLayer = @ptrCast(@alignCast(ptr));
-
-    if (!self.obey_robots) {
-        return self.next.request(ctx, req);
-    }
 
     const arena = try ctx.network.app.arena_pool.acquire(.small, "RobotsLayer");
     errdefer ctx.network.app.arena_pool.release(arena);

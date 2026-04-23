@@ -48,7 +48,7 @@ fn request(ptr: *anyopaque, ctx: Context, req: Request) anyerror!void {
     const self: *CacheLayer = @ptrCast(@alignCast(ptr));
     const network = ctx.network;
 
-    if (network.cache == null or req.params.method != .GET) {
+    if (req.params.method != .GET) {
         return self.next.request(ctx, req);
     }
 
