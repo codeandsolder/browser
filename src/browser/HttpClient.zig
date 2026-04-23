@@ -802,6 +802,7 @@ const SyncContext = struct {
 
 pub fn syncRequest(self: *Client, allocator: std.mem.Allocator, params: RequestParams) !SyncResponse {
     var sync_ctx = SyncContext{ .allocator = allocator, .body = .empty };
+    errdefer sync_ctx.body.deinit(allocator);
 
     try self.request(.{
         .params = params,
@@ -812,7 +813,6 @@ pub fn syncRequest(self: *Client, allocator: std.mem.Allocator, params: RequestP
         .error_callback = SyncContext.errorCallback,
         .shutdown_callback = SyncContext.shutdownCallback,
     });
-    errdefer sync_ctx.body.deinit(allocator);
 
     while (sync_ctx.completion == .in_progress) {
         _ = try self.tick(200);
