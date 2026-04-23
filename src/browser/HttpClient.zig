@@ -753,13 +753,13 @@ pub const SyncResponse = struct {
     status: u16,
     body: std.ArrayList(u8),
 
-    pub fn deinit(self: *SyncResponse, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *SyncResponse, allocator: Allocator) void {
         self.body.deinit(allocator);
     }
 };
 
 const SyncContext = struct {
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     completion: union(enum) {
         in_progress: void,
         done: void,
@@ -800,7 +800,7 @@ const SyncContext = struct {
     }
 };
 
-pub fn syncRequest(self: *Client, allocator: std.mem.Allocator, params: RequestParams) !SyncResponse {
+pub fn syncRequest(self: *Client, allocator: Allocator, params: RequestParams) !SyncResponse {
     var sync_ctx = SyncContext{ .allocator = allocator, .body = .empty };
     errdefer sync_ctx.body.deinit(allocator);
 
