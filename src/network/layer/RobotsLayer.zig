@@ -64,7 +64,8 @@ fn request(ptr: *anyopaque, ctx: Context, req: Request) anyerror!void {
     const robots_url = try URL.getRobotsUrl(arena, req.params.url);
 
     if (ctx.network.robot_store.get(robots_url)) |robot_entry| {
-        defer self.allocator.free(robots_url);
+        defer ctx.network.app.arena_pool.release(arena);
+
         switch (robot_entry) {
             .present => |robots| {
                 const path = URL.getPathname(req.params.url);
@@ -80,21 +81,29 @@ fn request(ptr: *anyopaque, ctx: Context, req: Request) anyerror!void {
         return self.next.request(ctx, req);
     }
 
-    return self.fetchRobotsThenRequest(ctx, robots_url, req);
+    return self.fetchRobotsThenRequest(ctx, arena, robots_url, req);
 }
 
-fn fetchRobotsThenRequest(self: *RobotsLayer, ctx: Context, robots_url: [:0]const u8, req: Request) !void {
+fn fetchRobotsThenRequest(
+    self: *RobotsLayer,
+    ctx: Context,
+    arena: std.mem.Allocator,
+    robots_url: [:0]const u8,
+    req: Request,
+) !void {
+    errdefer ctx.network.app.arena_pool.release(arena);
+
     const entry = try self.pending.getOrPut(self.allocator, robots_url);
 
     if (!entry.found_existing) {
-        errdefer self.allocator.free(robots_url);
+        errdefer std.debug.assert(self.pending.remove(robots_url));
         entry.value_ptr.* = .empty;
 
-        const robots_ctx = try self.allocator.create(RobotsContext);
-        errdefer self.allocator.destroy(robots_ctx);
+        const robots_ctx = try arena.create(RobotsContext);
         robots_ctx.* = .{
             .layer = self,
             .ctx = ctx,
+            .arena = arena,
             .robots_url = robots_url,
             .buffer = .empty,
         };
@@ -123,7 +132,7 @@ fn fetchRobotsThenRequest(self: *RobotsLayer, ctx: Context, robots_url: [:0]cons
             .shutdown_callback = RobotsContext.shutdownCallback,
         });
     } else {
-        self.allocator.free(robots_url);
+        ctx.network.app.arena_pool.release(arena);
     }
 
     try entry.value_ptr.append(self.allocator, req);
@@ -161,6 +170,7 @@ fn flushPendingShutdown(self: *RobotsLayer, robots_url: [:0]const u8) void {
 
 const RobotsContext = struct {
     layer: *RobotsLayer,
+    arena: std.mem.Allocator,
     ctx: Context,
     robots_url: [:0]const u8,
     buffer: std.ArrayListUnmanaged(u8),
@@ -180,7 +190,7 @@ const RobotsContext = struct {
                     self.status = hdr.status;
                 }
                 if (t.getContentLength()) |cl| {
-                    try self.buffer.ensureTotalCapacity(self.layer.allocator, cl);
+                    try self.buffer.ensureTotalCapacity(self.arena, cl);
                 }
             },
             .cached => {},
@@ -190,7 +200,7 @@ const RobotsContext = struct {
 
     fn dataCallback(response: Response, data: []const u8) anyerror!void {
         const self: *RobotsContext = @ptrCast(@alignCast(response.ctx));
-        try self.buffer.appendSlice(self.layer.allocator, data);
+        try self.buffer.appendSlice(self.arena, data);
     }
 
     fn doneCallback(ctx_ptr: *anyopaque) anyerror!void {
@@ -198,8 +208,7 @@ const RobotsContext = struct {
         const l = self.layer;
         const ctx = self.ctx;
         const robots_url = self.robots_url;
-        defer l.allocator.free(robots_url);
-        defer self.deinit();
+        defer ctx.network.app.arena_pool.release(self.arena);
 
         var allowed = true;
         const network = ctx.network;
@@ -217,7 +226,7 @@ const RobotsContext = struct {
                     };
                     if (robots) |r| {
                         try network.robot_store.put(robots_url, r);
-                        const path = URL.getPathname(self.layer.pending.get(robots_url).?.items[0].params.url);
+                        const path = URL.getPathname(l.pending.get(robots_url).?.items[0].params.url);
                         allowed = r.isAllowed(path);
                     }
                 }
@@ -243,8 +252,8 @@ const RobotsContext = struct {
         const l = self.layer;
         const ctx = self.ctx;
         const robots_url = self.robots_url;
-        defer l.allocator.free(robots_url);
-        defer self.deinit();
+        defer ctx.network.app.arena_pool.release(self.arena);
+
         log.warn(.http, "robots fetch failed", .{ .err = err });
         l.flushPending(ctx, robots_url, true);
     }
@@ -252,9 +261,10 @@ const RobotsContext = struct {
     fn shutdownCallback(ctx_ptr: *anyopaque) void {
         const self: *RobotsContext = @ptrCast(@alignCast(ctx_ptr));
         const l = self.layer;
+        const ctx = self.ctx;
         const robots_url = self.robots_url;
-        defer l.allocator.free(robots_url);
-        defer self.deinit();
+        defer ctx.network.app.arena_pool.release(self.arena);
+
         log.debug(.http, "robots fetch shutdown", .{});
         l.flushPendingShutdown(robots_url);
     }
