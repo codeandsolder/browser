@@ -80,7 +80,6 @@ fn request(ptr: *anyopaque, ctx: Context, req: Request) anyerror!void {
     const wrapped = cache_ctx.forward.wrapRequest(
         req,
         cache_ctx,
-        "forward",
         .{
             .start = CacheContext.startCallback,
             .header = CacheContext.headerCallback,

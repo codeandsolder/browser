@@ -54,11 +54,10 @@ pub fn wrapRequest(
     self: *Forward,
     req: Request,
     new_ctx: anytype,
-    comptime field: []const u8,
     overrides: Overrides,
 ) Request {
     const T = @TypeOf(new_ctx.*);
-    const PassthroughT = makePassthrough(T, field);
+    const PassthroughT = makePassthrough(T, "forward");
     var wrapped = req;
     wrapped.ctx = new_ctx;
     wrapped.start_callback = overrides.start orelse if (self.start != null) PassthroughT.start else null;
