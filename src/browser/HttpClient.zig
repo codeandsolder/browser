@@ -937,6 +937,10 @@ pub const Request = struct {
     pub const DoneCallback = *const fn (ctx: *anyopaque) anyerror!void;
     pub const ErrorCallback = *const fn (ctx: *anyopaque, err: anyerror) void;
     pub const ShutdownCallback = *const fn (ctx: *anyopaque) void;
+
+    pub fn deinit(self: Request) void {
+        self.params.headers.deinit();
+    }
 };
 
 pub const Response = struct {

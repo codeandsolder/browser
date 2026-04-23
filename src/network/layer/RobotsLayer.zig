@@ -141,11 +141,11 @@ fn flushPending(self: *RobotsLayer, ctx: Context, robots_url: [:0]const u8, allo
     for (queued.value.items) |queued_req| {
         if (!allowed) {
             log.warn(.http, "blocked by robots", .{ .url = queued_req.params.url });
-            defer queued_req.params.headers.deinit();
+            defer queued_req.deinit();
             queued_req.error_callback(queued_req.ctx, error.RobotsBlocked);
         } else {
             self.next.request(ctx, queued_req) catch |e| {
-                defer queued_req.params.headers.deinit();
+                defer queued_req.deinit();
                 queued_req.error_callback(queued_req.ctx, e);
             };
         }
@@ -158,7 +158,7 @@ fn flushPendingShutdown(self: *RobotsLayer, robots_url: [:0]const u8) void {
     defer queued.value.deinit(self.allocator);
 
     for (queued.value.items) |queued_req| {
-        defer queued_req.params.headers.deinit();
+        defer queued_req.deinit();
         if (queued_req.shutdown_callback) |cb| cb(queued_req.ctx);
     }
 }

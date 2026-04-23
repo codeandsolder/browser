@@ -63,7 +63,7 @@ fn request(ptr: *anyopaque, ctx: Context, req: Request) anyerror!void {
         .timestamp = std.time.timestamp(),
         .request_headers = req_header_list.items,
     })) |cached| {
-        defer req.params.headers.deinit();
+        defer req.deinit();
         defer network.app.arena_pool.release(arena);
         return serveFromCache(req, &cached);
     }
