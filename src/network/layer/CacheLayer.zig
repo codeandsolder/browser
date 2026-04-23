@@ -195,13 +195,13 @@ const CacheContext = struct {
                         }
                     }
                 }
-
-                const metadata = try allocator.create(CachedMetadata);
-                metadata.* = cm;
-                metadata.headers = header_list.items[0..end_of_response];
-                metadata.vary_headers = header_list.items[end_of_response..];
-                self.pending_metadata = metadata;
             }
+
+            const metadata = try allocator.create(CachedMetadata);
+            metadata.* = cm;
+            metadata.headers = header_list.items[0..end_of_response];
+            metadata.vary_headers = header_list.items[end_of_response..];
+            self.pending_metadata = metadata;
         }
 
         return self.forward.forwardHeader(response);
