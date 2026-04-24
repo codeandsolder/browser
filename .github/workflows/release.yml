@@ -19,6 +19,9 @@ on:
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
 permissions:
   contents: write
 
@@ -61,18 +64,6 @@ jobs:
       - name: Rename binary
         run: mv zig-out/bin/lightpanda lightpanda-${{ env.ARCH }}-${{ env.OS }}
 
-      - name: upload on s3
-        run: |
-          export DIR=`git show --no-patch --no-notes --pretty='%cs_%h'`
-          aws s3 cp --storage-class=GLACIER_IR lightpanda-${{ env.ARCH }}-${{ env.OS }} s3://lpd-nightly-build/${DIR}/lightpanda-${{ env.ARCH }}-${{ env.OS }}
-
-      - name: Upload the build
-        uses: ncipollo/release-action@v1
-        with:
-          allowUpdates: true
-          artifacts: lightpanda-${{ env.ARCH }}-${{ env.OS }}
-          tag: ${{ env.RELEASE }}
-          makeLatest: true
 
       - name: Share binary with packaging jobs
         uses: actions/upload-artifact@v4
@@ -119,18 +110,14 @@ jobs:
       - name: Rename binary
         run: mv zig-out/bin/lightpanda lightpanda-${{ env.ARCH }}-${{ env.OS }}
 
-      - name: upload on s3
-        run: |
-          export DIR=`git show --no-patch --no-notes --pretty='%cs_%h'`
-          aws s3 cp --storage-class=GLACIER_IR lightpanda-${{ env.ARCH }}-${{ env.OS }} s3://lpd-nightly-build/${DIR}/lightpanda-${{ env.ARCH }}-${{ env.OS }}
 
-      - name: Upload the build
-        uses: ncipollo/release-action@v1
+      - name: Share binary with packaging jobs
+        uses: actions/upload-artifact@v4
         with:
-          allowUpdates: true
-          artifacts: lightpanda-${{ env.ARCH }}-${{ env.OS }}
-          tag: ${{ env.RELEASE }}
-          makeLatest: true
+          name: lightpanda-${{ env.ARCH }}-${{ env.OS }}
+          path: lightpanda-${{ env.ARCH }}-${{ env.OS }}
+          retention-days: 1
+
 
   package-archlinux:
     strategy:
@@ -190,10 +177,9 @@ jobs:
           cd pkg
           sudo -u builder env CARCH=${{ env.ARCH }} makepkg -f --noconfirm -A
 
-      - name: Upload Arch package to release
-        uses: ncipollo/release-action@v1
+
+      - uses: actions/upload-artifact@v4
         with:
-          allowUpdates: true
-          artifacts: pkg/lightpanda-*-${{ env.ARCH }}.pkg.tar.zst
-          tag: ${{ env.RELEASE }}
-          makeLatest: true
+          name: lightpanda-*-${{ env.ARCH }}.pkg.tar.zst
+          path: pkg/lightpanda-*-${{ env.ARCH }}.pkg.tar.zst
+          retention-days: 1
