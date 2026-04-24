@@ -1095,7 +1095,7 @@ fn pageDoneCallback(ctx: *anyopaque) !void {
             const html = try std.mem.concat(parse_arena, u8, &.{
                 "<html><head><meta charset=\"utf-8\"></head><body><img src=\"",
                 self.url,
-                "\"></body></htm>",
+                "\"></body></html>",
             });
             parser.parse(html);
             self.documentIsComplete();
@@ -1122,7 +1122,7 @@ fn pageDoneCallback(ctx: *anyopaque) !void {
             const html = try std.mem.concat(parse_arena, u8, &.{
                 "<html><head><meta charset=\"utf-8\"></head><body><h1>Navigation failed</h1><p>Reason: ",
                 @errorName(err),
-                "</p></body></htm>",
+                "</p></body></html>",
             });
 
             parser.parse(html);
@@ -1346,7 +1346,10 @@ pub fn removeElementId(self: *Page, element: *Element, id: []const u8) void {
 
 pub fn removeElementIdWithMaps(self: *Page, id_maps: ElementIdMaps, id: []const u8) void {
     if (id_maps.lookup.remove(id)) {
-        id_maps.removed_ids.put(self.arena, self.dupeString(id) catch return, {}) catch {};
+        const str = self.dupeString(id) catch return;
+        id_maps.removed_ids.put(self.arena, str) catch |e| {
+            log.debug(.page, "removeElementIdWithMaps: failed to track removed id: {}", .{e});
+        };
     }
 }
 

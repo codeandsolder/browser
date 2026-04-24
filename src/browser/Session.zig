@@ -348,6 +348,8 @@ pub fn scheduleNavigation(self: *Session, page: *Page) !void {
 }
 
 pub fn processQueuedNavigation(self: *Session) !void {
+    lp.assert(self.page != null, "Session.processQueuedNavigation - page is null", .{});
+
     const navigations = self.queued_navigation;
     if (self.queued_navigation == &self.queued_navigation_1) {
         self.queued_navigation = &self.queued_navigation_2;

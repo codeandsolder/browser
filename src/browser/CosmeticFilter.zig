@@ -40,6 +40,16 @@ pub const CosmeticFilter = struct {
         defer arena.deinit();
         const arena_alloc = arena.allocator();
 
+        var escaped = std.ArrayList(u8).init(arena_alloc);
+        for (cosmetics_json) |c| {
+            switch (c) {
+                '\\' => try escaped.appendSlice("\\\\"),
+                '\'' => try escaped.appendSlice("\\'"),
+                else => try escaped.append(c),
+            }
+        }
+        const escaped_json = escaped.items;
+
         const script = try std.fmt.allocPrint(arena_alloc,
             \\(function() {
             \\  const rules = JSON.parse('{s}');
@@ -53,7 +63,7 @@ pub const CosmeticFilter = struct {
             \\    });
             \\  }
             \\})();
-        , .{cosmetics_json});
+        , .{escaped_json});
 
         try filter.execJS(page, script);
     }
@@ -127,12 +137,11 @@ pub const CosmeticFilter = struct {
 
         _ = ls.local.exec(script, "adblock-cosmetic-filter") catch |err| {
             const caught = try_catch.caughtOrError(filter.allocator, err);
-            log.debug(.page, "cosmetic filter script error: {f}", .{caught});
+            log.debug(.page, "cosmetic filter script error: {s}", .{caught});
         };
     }
 
-    pub fn applyDynamicContent(filter: *CosmeticFilter, page: *Page, content: []const u8) !void {
-        _ = content;
+    pub fn applyDynamicContent(filter: *CosmeticFilter, page: *Page) !void {
         try filter.injectDefaultRules(page);
     }
 

@@ -1131,7 +1131,7 @@ fn parseCommonArg(
                 return false;
             });
         }
-        common.log_filter_scopes = arr.items;
+        common.log_filter_scopes = arr.items.slice();
         return true;
     }
 
