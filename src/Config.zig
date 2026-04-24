@@ -681,7 +681,7 @@ pub fn printUsageAndExit(self: *const Config, success: bool) void {
 }
 
 pub fn parseArgs(allocator: Allocator) !Config {
-    const exec_name, const command = try Commands.parse(allocator);
+const exec_name, const command = try Commands.parse(allocator);
     return .init(allocator, exec_name, command);
 }
 

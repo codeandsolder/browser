@@ -4,3 +4,7 @@ zig-out
 lightpanda.id
 /src/html5ever/target/
 src/snapshot.bin
+/zig-pkg
+/zig-x86_64-linux-0.15.2
+/prebuilt/
+/vendor/adblock-c-ffi/target/
